@@ -1,0 +1,6 @@
+[tool.ruff]
+extend-select = [
+    "I", "N", "SIM"
+]
+
+line-length = 88
