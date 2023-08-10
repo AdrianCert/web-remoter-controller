@@ -6,17 +6,19 @@ from aiohttp_sse import EventSourceResponse, sse_response
 
 routes = web.RouteTableDef()
 resurces = Path(__file__).parents[1].joinpath("data")
-devices = [True, False, True, False]
-devices_mac = [0, 2, 3, 4]
+devices = [True, False, True, False, False]
+devices_mac = [0, 2, 3, 4, 5]
 
 event_source: EventSourceResponse = None
 event_look = asyncio.locks.Lock()
 
 
 async def send_relay_status(relay_index):
-    if not event_source:
+    if event_source is None:
         return
     async with event_look:
+        if relay_index >= len(devices_mac):
+            return
         if devices_mac[relay_index] == 0:
             return
         event_name = "relay_on" if devices[relay_index] else "relay_off"
@@ -42,6 +44,13 @@ async def index_css(request):
 @routes.get("/update")
 async def update(request):
     # request.get
+    if request.query.get("relay") is None:
+        dev_state = {"on": True, "off": False}.get(request.query.get("state"))
+        for dev_id in range(len(devices_mac)):
+            devices[dev_id] = dev_state
+            await send_relay_status(dev_id)
+        return web.Response(body="OK")
+
     dev_id = int(request.query.get("relay")) - 1
     dev_state = {"on": True, "off": False}.get(request.query.get("state"))
     devices[dev_id] = dev_state
