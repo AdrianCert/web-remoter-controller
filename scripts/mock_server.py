@@ -1,5 +1,7 @@
 import asyncio
 from pathlib import Path
+from typing import Any, Dict
+from uuid import uuid4
 
 from aiohttp import web
 from aiohttp_sse import EventSourceResponse, sse_response
@@ -9,8 +11,19 @@ resurces = Path(__file__).parents[1].joinpath("data")
 devices = [True, False, True, False, False]
 devices_mac = [0, 2, 3, 4, 5]
 
-event_source: EventSourceResponse = None
+event_source: Dict[str, EventSourceResponse] = {}
 event_look = asyncio.locks.Lock()
+
+
+async def safe_run(coro: Any, clue: Any, exp_handler: Any | None = None):
+    try:
+        return await coro
+    except Exception:
+        return exp_handler(clue)
+
+
+def clean_event_client(client):
+    event_source.pop(client, None)
 
 
 async def send_relay_status(relay_index):
@@ -23,7 +36,14 @@ async def send_relay_status(relay_index):
             return
         event_name = "relay_on" if devices[relay_index] else "relay_off"
         event_msg = str(relay_index + 1)
-        await event_source.send(data=event_msg, event=event_name)
+        await asyncio.gather(
+            *[
+                safe_run(
+                    es.send(data=event_msg, event=event_name), key, clean_event_client
+                )
+                for key, es in event_source.items()
+            ]
+        )
 
 
 @routes.get("/")
@@ -78,7 +98,7 @@ async def events(request):
     global event_source
 
     async with sse_response(request) as resp:
-        event_source = resp
+        event_source[uuid4().hex] = resp
         while True:
             for dev_id in range(5):
                 await send_relay_status(dev_id)
