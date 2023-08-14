@@ -91,11 +91,10 @@ body {
 
 .switch.offline {
     color: #2f4468;
-
 }
 .switch.offline::after {
     color: #2f4468;
-    content: "off";
+    content: "~off";
     pointer-events: none;
 }
 .switch.offline input {
@@ -131,6 +130,14 @@ body {
     -webkit-transition: 0.4s;
     transition: 0.4s;
     border-radius: 68px;
+}
+
+.switch.offline .slider {
+    background-color: #6e6868;
+}
+
+.switch.offline input:checked+.slider {
+    background-color: #703a3a;
 }
 
 input:checked+.slider {
