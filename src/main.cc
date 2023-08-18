@@ -1,19 +1,36 @@
 #include <Arduino.h>
 
-// #include <Esp.h>
-
-// #include <FS.h>
-// #include <LittleFS.h>
+#include <ArduinoJson.h>
 #include <ESP8266WiFi.h>
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <Wire.h>
-#include <espnow.h>
-#include <ArduinoJson.h>
-#include <ESP8266mDNS.h>
+
+#include <IPAddress.h>
+#include <functions/mswitch.hpp>
+#include <painlessMesh.h>
+
+#define MESH_BSSID "wrcnet"
+#define MESH_TOKEN "wrcnetpass"
+#define MESH_CHANNEL 8
+#define MESH_PORT 5555
+
+#define STATION_SSID "Adrian SSID"
+#define STATION_TOKEN "parola1234"
+
+#define PARAM_INPUT_RELAY "relay"
+#define PARAM_INPUT_STATE "state"
+
+#define CAPTURE_FRAME 1
+#define PIN_RELAY 0
+#define PIN_RELAY_PULL_UP false
+#define MAX_MANAGED_DEV 5
+#define DELAY_TIME 30000
+#define SERIAL_BOUND 115200
 
 // before complile and uploading run the command
-// python .\scripts\data_sync.py cls src/main.cc -i data/index.html:index_html -i data/index.js:index_js -i data/style.css:index_css
+// python .\scripts\data_sync.py cls src/main.cc -i data/index.html:index_html
+// -i data/index.js:index_js -i data/style.css:index_css
 const char index_html[] PROGMEM = R"rawliteral(
 )rawliteral";
 
@@ -23,554 +40,208 @@ const char index_css[] PROGMEM = R"rawliteral(
 const char index_js[] PROGMEM = R"rawliteral(
 )rawliteral";
 
-#define CAPTURE_FRAME 1
-#define PIN_RELAY 0
-#define MAX_MANAGED_DEV 5
-#define LOCAL_MANAGED_DEV 0xa
-#define DELAY_TIME 30000
-#define SERIAL_BOUND 115200
+using painlessmesh::wifi::Mesh;
 
-enum PairingStatus
-{
-    PAIR_REQUEST,
-    PAIR_REQUESTED,
-    PAIR_PAIRED,
-    PAIR_PRIMARY
+namespace wrc {
+namespace flags {
+enum FuseBits {
+  EVENT_STEAM = 0b1,
+  MESH_ROOT = 0b10,
+  SERVER_HOST = 0b100,
 };
+} // namespace flags
+} // namespace wrc
 
-enum MessageTypes
-{
-    MSG_PAIR_TX,
-    MSG_PAIR_RX,
-    MSG_DATA,
-    MSG_PING,
-    MSG_PONG
-};
+void callback_receive_setup(const uint32_t &from, const String &msg);
+void callback_receive_worker(const uint32_t &from, const String &msg);
+void setup_mesh();
+void setup_server();
+void rutine_send_event_stream();
+void rutine_elevate_root();
+bool mesh_single_send(uint32_t dest, String msg);
+bool hasfusebis(uint32_t mask);
+void setfusebis(uint32_t bit);
+bool server_process_update(String state, String swid = "");
 
-
-enum ActionsValues
-{
-    ACT_RELAY_ON,
-    ACT_RELAY_OFF,
-    ACT_RELAY_TGL,
-};
-
-typedef struct MessagePayload
-{
-    uint8_t type;
-    uint8_t id;
-    uint8_t action;
-    uint8_t value;
-} MessagePayload;
-
-typedef struct PairDevice
-{
-    uint8_t type;
-    uint8_t id;
-    uint8_t addr[6];
-    uint8_t channel;
-} PairDevice;
-
-enum DeviceState
-{
-    START_UP,
-    PAIR_SL,
-    PAIR_MS,
-    GRANTED_MS,
-    START_MS,
-    READY_MS,
-    READY_SL,
-};
-
-const char *PARAM_INPUT_RELAY = "relay";
-const char *PARAM_INPUT_STATE = "state";
-
-PairingStatus pair_status = PAIR_REQUEST;
-DeviceState dev_state = START_UP;
-PairDevice pair_dev;
-MessagePayload msg_recv;
-MessagePayload msg_send;
-uint8_t pair_channel = 1;
-uint8_t pair_id = 0;
-int _status = 0;
-static int local_r_state = LOW;
-const char *ssid = "Adrian SSID";
-const char *password = "parola1234";
-unsigned long ts_last, ts_curr;
-
-PairDevice recv_pair_dev;
-PairDevice *managed_devices[] = {0x0, 0x0, 0x0, 0x0, 0x0};
-uint8_t status_devices[] = {0x0, 0x0, 0x0, 0x0, 0x0};
-uint8_t broadcast_address[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-
+uint32_t sflags{wrc::flags::EVENT_STEAM};
+Mesh mesh{};
+MeshSwitchFunction msf{MAX_MANAGED_DEV};
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
+BaseFunction *activeFunction[]{&msf, nullptr};
 
-void relay_tongle()
-{
-    Serial.println("Device action: relay_tongle");
-    local_r_state = local_r_state == LOW ? HIGH : LOW;
-    digitalWrite(PIN_RELAY, local_r_state);
-    digitalWrite(LED_BUILTIN, local_r_state);
+void setup() {
+  Serial.begin(SERIAL_BOUND);
+
+  setup_mesh();
+
+  if (sflags & wrc::flags::MESH_ROOT) {
+    setup_server();
+  }
+
+  LocalSwitch *lsf = new LocalSwitch{PIN_RELAY, !PIN_RELAY_PULL_UP};
+  msf.setup_send_proc(&mesh_single_send);
+  msf.setup_local_switch(mesh.getNodeId(), lsf);
+  mesh.sendBroadcast(msf.name() + "::query::registration");
 }
 
-void relay_on()
-{
-    Serial.println("Device action: relay_on");
-    local_r_state = LOW;
-    digitalWrite(PIN_RELAY, local_r_state);
-    digitalWrite(LED_BUILTIN, local_r_state);
+void loop() {
+  mesh.update();
+  rutine_send_event_stream();
+  rutine_elevate_root();
 }
 
-void relay_off()
-{
-    Serial.println("Device action: relay_off");
-    local_r_state = HIGH;
-    digitalWrite(PIN_RELAY, local_r_state);
-    digitalWrite(LED_BUILTIN, local_r_state);
+void setup_mesh() {
+  Serial.println("Running 'setup_mesh' ...");
+  mesh.setDebugMsgTypes(ERROR | STARTUP | CONNECTION);
+  mesh.init(MESH_BSSID, MESH_TOKEN, MESH_PORT, WIFI_AP_STA, MESH_CHANNEL);
+  mesh.onReceive(&callback_receive_setup);
+
+  mesh.setContainsRoot(true);
+  mesh.onReceive(&callback_receive_worker);
 }
 
-void handle_msg_pair_rx(uint8_t *mac_addr, PairDevice *data)
-{
-    // processing response from server (slave will do it)
-    if (PAIR_SL != dev_state)
-        return;
-    if (PAIR_REQUESTED != pair_status)
-        return;
+void rutine_elevate_root() {
+  if (hasfusebis(wrc::flags::MESH_ROOT)) {
+    return;
+  }
 
-    memcpy(&pair_dev, data, sizeof(PairDevice));
-    memcpy(&pair_dev.addr, mac_addr, 6);
-
-    pair_id = pair_dev.id;
-    pair_dev.id = 1;
+  Serial.println("Running rutine 'rutine_elevate_root' ...");
+  // configuration for root
+  if (mesh.getNodeList().size() == 0)
+    Serial.println("Elevate current node as root ...");
+  mesh.setHostname("WRC_BRIDGE");
+  mesh.stationManual(STATION_SSID, STATION_TOKEN);
+  mesh.setRoot(true);
+  setfusebis(wrc::flags::MESH_ROOT);
 }
 
-void handle_msg_pair_tx(uint8_t *mac_addr, PairDevice *data)
-{
-    // processing request from server (server will do it)
-    // if for bord will be allocated and stored
+void rutine_send_event_stream() {
+  static uint64_t last_ts;
+  if ((sflags & wrc::flags::EVENT_STEAM) == 0x0) {
+    return;
+  }
+  if ((sflags & wrc::flags::SERVER_HOST) == 0x0) {
+    return;
+  }
 
-    // if (esp_now_is_peer_exist(mac_addr)) {
-    //     // Slave already paired.
-    //     Serial.println("Already Paired");
-    //     return;
-    // }
+  if ((millis() - last_ts) <= DELAY_TIME) {
+    return;
+  }
 
-    uint8_t dev_id = 0;
-    while (dev_id < MAX_MANAGED_DEV)
-    {
-        if (managed_devices[dev_id] == 0)
-        {
-            break;
-        }
-        dev_id++;
-    }
-    if (MAX_MANAGED_DEV == dev_id)
-        return;
-    managed_devices[dev_id] = (PairDevice *)malloc(sizeof(PairDevice));
-    managed_devices[dev_id]->type = MSG_PAIR_RX;
-    managed_devices[dev_id]->id = dev_id + 1;
-    managed_devices[dev_id]->channel = pair_channel;
-    memcpy(managed_devices[dev_id]->addr, mac_addr, 6);
-    events.send(String(dev_id + 1).c_str(), "relay_ready", millis());
-
-    // esp_now_add_peer(mac_addr);
-    esp_now_send(mac_addr, (uint8_t *)managed_devices[dev_id], sizeof(PairDevice));
+  Serial.println("Event update sending ...");
+  events.send("ping", NULL, millis());
+  auto msf_iter = msf.iter_states();
+  while (!msf_iter.done()) {
+    events.send(String(msf_iter.id() + 1).c_str(),
+                msf_iter.state() ? "relay_on" : "relay_off", millis());
+    msf_iter.next();
+  }
+  last_ts = millis();
 }
 
-void handle_msg_data(uint8_t *mac_addr, MessagePayload *data)
-{
-    if (READY_SL != dev_state) {
-        Serial.println("Device not ready to receive commands ...");
-        return;
+void setup_server() {
+  Serial.println("Setting up the server");
+  setfusebis(wrc::flags::SERVER_HOST);
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    Serial.println("[HTTP][GET] /");
+    request->send(200, "text/html", index_html);
+  });
+
+  server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest *request) {
+    Serial.println("[HTTP][GET] /style.css");
+    request->send(200, "text/css", index_css);
+  });
+
+  server.on("/index.js", HTTP_GET, [](AsyncWebServerRequest *request) {
+    Serial.println("[HTTP][GET] /index.js");
+    request->send(200, "text/javascript", index_js);
+  });
+
+  server.on("/update", HTTP_GET, [](AsyncWebServerRequest *request) {
+    Serial.print("[HTTP][GET] ");
+    Serial.println(request->url());
+    if (request->hasParam(PARAM_INPUT_RELAY) &
+        request->hasParam(PARAM_INPUT_STATE)) {
+      server_process_update(request->getParam(PARAM_INPUT_STATE)->value(),
+                            request->getParam(PARAM_INPUT_RELAY)->value());
     }
-    if (data->id != pair_id) {
-        Serial.print("Device id is not matched local_id=");
-        Serial.print(pair_id);
-        Serial.print(" targer_id=");
-        Serial.println(data->id);
-        return;
+
+    else if (request->hasParam(PARAM_INPUT_STATE)) {
+      server_process_update(request->getParam(PARAM_INPUT_STATE)->value());
     }
-    if (ACT_RELAY_ON == data->action)
-    {
-        relay_on();
+
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/relays", HTTP_GET, [](AsyncWebServerRequest *request) {
+    StaticJsonDocument<200> doc;
+    String respone;
+    auto msf_iter = msf.iter_states();
+    while (!msf_iter.done()) {
+      doc[String(msf_iter.id() + 1)] = msf_iter.state() ? "on" : "off";
+      msf_iter.next();
     }
-    if (ACT_RELAY_OFF == data->action)
-    {
-        relay_off();
+    serializeJson(doc, respone);
+    request->send(200, "application/json", respone);
+  });
+
+  events.onConnect([](AsyncEventSourceClient *client) {
+    if (client->lastId()) {
+      Serial.printf("Client reconnected! Last message ID that it got is: %u\n",
+                    client->lastId());
     }
-    if (ACT_RELAY_TGL == data->action)
-    {
-        relay_tongle();
-    }
+    client->send("hello!", NULL, millis(), 10000);
+  });
+
+  server.addHandler(&events);
+  server.begin();
+  Serial.println("Server ready ... ");
 }
 
-void print_mac(const uint8_t *mac_addr)
-{
-    char mac_str[18];
-    snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
-             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
-    Serial.print(mac_str);
+void callback_receive_setup(const uint32_t &from, const String &msg) {
+  Serial.printf("incoming message from %u : %s\n", from, msg.c_str());
 }
 
-void esp_frame_trace(uint8_t direction, uint8_t *mac_addr, uint8_t *data, uint8_t len) {
-    Serial.print(direction ? "frame <= ": "frame => ");
-    print_mac(mac_addr);
-    Serial.print(" [ ");
-    Serial.print(len);
-    Serial.println(" ]");
-    for(int i=0; i<len; i++) {
-        Serial.print(*(data+i));
-        Serial.print(" ");
-    }
-    Serial.println("");
-
+void callback_receive_worker(const uint32_t &from, const String &msg) {
+  Serial.printf("incoming message from %u : %s\n", from, msg.c_str());
+  for (BaseFunction **fct = activeFunction; fct != nullptr; fct++) {
+    (*fct)->run(msg, from);
+  }
 }
 
-void esp_on_send(uint8_t *mac_addr, uint8_t status)
-{
-    Serial.print("Last packet sent status: ");
-    print_mac(mac_addr);
-    if (status == 0)
-    {
-        Serial.println(" success");
-    }
-    else
-    {
-        Serial.println(" fail");
-    }
-    Serial.println();
+bool hasfusebis(uint32_t mask) { return (sflags & mask) == mask; }
+void setfusebis(uint32_t bit) { sflags |= bit; }
+bool mesh_single_send(uint32_t dest, String msg) {
+  Serial.printf("outgoing message to %u : %s\n", dest, msg.c_str());
+  return mesh.sendSingle(dest, msg);
 }
 
-void esp_on_recv(uint8_t *mac_addr, uint8_t *data, uint8_t len)
-{
-    #ifdef CAPTURE_FRAME
-    esp_frame_trace(1, mac_addr, data, len);
-    #endif
+bool server_process_update(String state, String swid) {
+  String event_name{""};
+  bool action_result{false};
 
-    uint8_t d_type = data[0];
-
-    switch (d_type)
-    {
-    case MSG_PAIR_RX:
-        memcpy(&recv_pair_dev, data, len);
-        handle_msg_pair_rx(mac_addr, &recv_pair_dev);
-    case MSG_PAIR_TX:
-        // request for pairing
-        memcpy(&recv_pair_dev, data, len);
-        handle_msg_pair_tx(mac_addr, &recv_pair_dev);
-        break;
-    case MSG_DATA:
-        MessagePayload recv_msg;
-        memcpy(&recv_msg, data, len);
-        handle_msg_data(mac_addr, &recv_msg);
-        break;
-    default:
-        break;
+  if (swid == "") {
+    auto msf_iter = msf.iter_states();
+    while (!msf_iter.done()) {
+      server_process_update(state, String(msf_iter.id() + 1));
+      msf_iter.next();
     }
-}
+    return true;
+  }
 
-void esp_to_setup()
-{
-    if (esp_now_init() != 0)
-    {
-        Serial.println("Error initializing ESP-NOW");
-    }
-    esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
-    // set callback routines
-    esp_now_register_send_cb(esp_on_send);
-    esp_now_register_recv_cb(esp_on_recv);
-}
+  if (state.equals(String("on"))) {
+    action_result = msf.on(swid.toInt() - 1);
+    event_name = "relay_on";
+  }
 
-PairingStatus auto_pairing()
-{
-    switch (pair_status)
-    {
-    case PAIR_REQUEST:
-        Serial.print("Pairing request on channel ");
-        Serial.println(pair_channel);
+  if (state.equals(String("off"))) {
+    action_result = msf.off(swid.toInt() - 1);
+    event_name = "relay_off";
+  }
 
-        // clean esp now
-        esp_now_deinit();
-        WiFi.mode(WIFI_STA);
-        // set WiFi channel
-        wifi_promiscuous_enable(1);
-        wifi_set_channel(pair_channel);
-        wifi_promiscuous_enable(0);
-        // WiFi.printDiag(Serial);
-        WiFi.disconnect();
-
-        // Init ESP-NOW
-        esp_to_setup();
-
-        pair_dev.id = 0;
-        pair_dev.type = MSG_PAIR_TX;
-        pair_dev.channel = pair_channel;
-
-        // add peer and send request
-        ts_last = millis();
-        _status = esp_now_send(broadcast_address, (uint8_t *)&pair_dev, sizeof(pair_dev));
-        Serial.println(_status);
-        pair_status = PAIR_REQUESTED;
-        break;
-
-    case PAIR_REQUESTED:
-        // time out to allow receiving response from server
-        ts_curr = millis();
-        if (ts_curr - ts_last > 100)
-        {
-            ts_last = ts_curr;
-            // time out expired,  try next channel
-            pair_channel++;
-            if (pair_channel > 11)
-            {
-                pair_status = PAIR_PRIMARY;
-                pair_channel = 0;
-                break;
-            }
-            pair_status = PAIR_REQUEST;
-        }
-        break;
-
-    case PAIR_PAIRED:
-        break;
-    case PAIR_PRIMARY:
-        break;
-    }
-    return pair_status;
-}
-
-void network_init()
-{
-    dev_state = PAIR_SL;
-    // Set device as a Wi-Fi Station
-    WiFi.mode(WIFI_STA);
-    Serial.println(WiFi.macAddress());
-    WiFi.disconnect();
-
-    esp_to_setup();
-    pair_status = PAIR_REQUEST;
-    while (1)
-    {
-        auto_pairing();
-        if (PAIR_PRIMARY == pair_status)
-        {
-            pair_id = 1;
-            break;
-        }
-        if (PAIR_PAIRED == pair_status)
-        {
-            dev_state = READY_SL;
-            break;
-        }
-    }
-
-    if (READY_SL == dev_state)
-    {
-        return;
-    }
-
-    dev_state = PAIR_MS;
-    esp_now_deinit();
-    esp_to_setup();
-
-    Serial.println("Device granted for master");
-    Serial.print("Server mac address: ");
-    Serial.println(WiFi.macAddress());
-
-    WiFi.mode(WIFI_AP_STA);
-    // Set device as a Wi-Fi Station
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED)
-    {
-        delay(1000);
-        Serial.println("Setting as a Wi-Fi Station..");
-    }
-
-    pair_channel = WiFi.channel();
-    Serial.print("Server SOFT AP MAC Address:  ");
-    Serial.println(WiFi.softAPmacAddress());
-    Serial.print("Station IP Address: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("Wi-Fi Channel: ");
-    Serial.println(pair_channel);
-
-    dev_state = GRANTED_MS;
-}
-
-void process_relay_action(int relay, const String &state)
-{
-    int8_t state_val = 3;
-    Serial.print("Apply action relay ");
-    Serial.print(state);
-    Serial.print(" on #");
-    Serial.println(relay);
-
-    if(state.equals(String("on"))) {
-        state_val = 1;
-    }
-
-    if(state.equals(String("off"))) {
-        state_val = 0;
-    }
-
-    if(state_val == 3) {
-        return;
-    }
-    if(managed_devices[relay] == 0x0) {
-        return;
-    }
-
-    status_devices[relay] = state_val ? ACT_RELAY_ON: ACT_RELAY_OFF;
-
-    // local input
-    if (relay == pair_id - 1) {
-        Serial.println("Apply action relay localy");
-        events.send(String(relay + 1).c_str(), state_val ? "relay_on" : "relay_off", millis());
-        Serial.println("Update event was sent ...");
-        return state_val ? relay_on() : relay_off();
-    }
-
-    MessagePayload send_msg;
-
-    send_msg.type = MSG_DATA;
-    send_msg.id = relay;
-    send_msg.action = state_val? ACT_RELAY_ON: ACT_RELAY_OFF;
-
-    _status = esp_now_send(managed_devices[relay]->addr, (uint8_t*)&send_msg, sizeof(MessagePayload));
-    events.send(String(relay + 1).c_str(), state_val ? "relay_on" : "relay_off", millis());
-    Serial.println("Update event was sent ...");
-}
-
-void server_init()
-{
-    Serial.print("Current device state ");
-    Serial.println(dev_state);
-    if(GRANTED_MS != dev_state)
-        return;
-    Serial.println("Setting up the server");
-
-    managed_devices[pair_id - 1] = (PairDevice*)LOCAL_MANAGED_DEV;
-
-    server.on(
-        "/",
-        HTTP_GET,
-        [](AsyncWebServerRequest *request)
-        {
-            Serial.println("[HTTP][GET] /");
-            request->send(200, "text/html", index_html);
-            // request->send(LittleFS, "/index.html", "text/html");
-        });
-
-    server.on(
-        "/style.css",
-        HTTP_GET,
-        [](AsyncWebServerRequest *request)
-        {
-            Serial.println("[HTTP][GET] /style.css");
-            request->send(200, "text/css", index_css);
-            // request->send(LittleFS, "/style.css", "text/css");
-        });
-
-    server.on(
-        "/index.js",
-        HTTP_GET,
-        [](AsyncWebServerRequest *request)
-        {
-            Serial.println("[HTTP][GET] /index.js");
-            request->send(200, "text/javascript", index_js);
-            // request->send(LittleFS, "/index.js", "text/javascript");
-        });
-
-    server.on(
-        "/update",
-        HTTP_GET,
-        [](AsyncWebServerRequest *request)
-        {
-            Serial.print("[HTTP][GET] ");
-            Serial.println(request->url());
-            if(request->hasParam(PARAM_INPUT_RELAY) & request->hasParam(PARAM_INPUT_STATE)) {
-                process_relay_action(
-                    request->getParam(PARAM_INPUT_RELAY)->value().toInt()-1,
-                    request->getParam(PARAM_INPUT_STATE)->value()
-                );
-            }
-
-            else if(request->hasParam(PARAM_INPUT_STATE)) {
-                for(uint8_t dev_id = 0; dev_id < MAX_MANAGED_DEV; dev_id++) {
-                    if(managed_devices[dev_id] != 0x0) continue;
-                    process_relay_action(
-                        dev_id,
-                        request->getParam(PARAM_INPUT_STATE)->value()
-                    );
-                }
-            }
-
-            request->send(200, "text/plain", "OK");
-        });
-
-    server.on(
-        "/relays",
-        HTTP_GET,
-        [](AsyncWebServerRequest *request)
-        {
-            StaticJsonDocument<200> doc;
-            String respone;
-            for(uint8_t dev_id = 0; dev_id < MAX_MANAGED_DEV; dev_id++) {
-                if(managed_devices[dev_id] != 0x0) {
-                    doc[String(dev_id + 1)] = status_devices[dev_id] ? "on": "off";
-                }
-            }
-            serializeJson(doc, respone);
-            request->send(200, "application/json", respone);
-        });
-
-    events.onConnect([](AsyncEventSourceClient *client) {
-        if(client->lastId()){
-            Serial.printf("Client reconnected! Last message ID that it got is: %u\n", client->lastId());
-        }
-        // send event with message "hello!", id current millis
-        // and set reconnect delay to 1 second
-        client->send("hello!", NULL, millis(), 10000);
-    });
-
-    server.addHandler(&events);
-    server.begin();
-
-    dev_state = READY_MS;
-    Serial.println("Server ready ... ");
-}
-
-void setup()
-{
-    Serial.begin(SERIAL_BOUND);
-
-    Serial.println("Start");
-
-    pinMode(LED_BUILTIN, OUTPUT); // Initialize the LED_BUILTIN pin as an output
-    digitalWrite(LED_BUILTIN, LOW);
-    pinMode(PIN_RELAY, OUTPUT); // Initialize the PIN_RELAY pin as an output
-    network_init();             // Initialize the network
-    server_init();              // Initialize the server
-}
-
-// the loop function runs over and over again forever
-void loop()
-{
-    if(READY_MS != dev_state) {
-        return;
-    }
-
-    if ((millis() - ts_last) > DELAY_TIME) {
-        // Send Events to the Web Server with the Sensor Readings
-        Serial.println("Event update sending ...");
-        events.send("ping",NULL,millis());
-        uint8_t dev_id = 0;
-        for(dev_id = 0; dev_id < MAX_MANAGED_DEV; dev_id++) {
-            if(managed_devices[dev_id] != 0x0) {
-                events.send(String(dev_id + 1).c_str(), status_devices[dev_id]? "relay_on" : "relay_off", millis());
-            }
-        }
-        ts_last = millis();
-    }
+  events.send(swid.c_str(), event_name.c_str(), millis());
+  Serial.println("Update event was sent ...");
+  return action_result;
 }
