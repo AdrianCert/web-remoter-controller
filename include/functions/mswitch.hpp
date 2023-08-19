@@ -6,8 +6,8 @@
 class MeshSwitchFunction : public BaseFunction {
   uint8_t _local_sw_id{0};
   LocalSwitch *_local_sw{nullptr};
-  bool *_states_sw{nullptr};
-  uint32_t *_node_ids{nullptr};
+  bool _states_sw[10];
+  uint32_t _node_ids[10];
   uint8_t _size;
 
   bool (*send)(uint32_t, String){nullptr};
@@ -22,10 +22,12 @@ class MeshSwitchFunction : public BaseFunction {
     }
 
     String req = _states_sw[swid] ? "update::on" : "update::off";
-    Serial.print("Sending the message \"");
-    Serial.print(req.c_str());
-    Serial.print("\" to node ");
-    Serial.println(this->_node_ids[swid]);
+    Serial.printf("SENDING to %d the message \"%s\"\n", this->_node_ids[swid],
+                  req.c_str());
+
+    if (!this->_node_ids[swid]) {
+      return false;
+    }
 
     return this->emit(this->_node_ids[swid], req);
   }
@@ -35,21 +37,13 @@ public:
 
   MeshSwitchFunction(uint8_t maxsw = 5) {
     this->_size = maxsw;
-    this->_states_sw = (bool *)malloc(maxsw * sizeof(bool));
-    this->_node_ids = (uint32_t *)malloc(maxsw * sizeof(uint32_t));
+    for (uint8_t ind = 0; ind < _size; ind++) {
+      _states_sw[ind] = false;
+      _node_ids[ind] = 0;
+    }
   }
 
   ~MeshSwitchFunction() {
-    if (this->_states_sw != nullptr) {
-      free(this->_states_sw);
-      this->_states_sw = nullptr;
-    }
-
-    if (this->_node_ids != nullptr) {
-      free(this->_node_ids);
-      this->_node_ids = nullptr;
-    }
-
     if (this->_local_sw != nullptr) {
       free(this->_local_sw);
       this->_local_sw = nullptr;
@@ -60,9 +54,9 @@ public:
 
   void setup_send_proc(bool (*send)(uint32_t, String)) { this->send = send; }
 
-  void setup_local_switch(uint8_t node_id, LocalSwitch *sw_function) {
-    this->_local_sw_id = node_id;
+  void setup_local_switch(uint32_t node_id, LocalSwitch *sw_function) {
     this->_local_sw = sw_function;
+    setup_remote_switch(node_id, 1);
   }
 
   void free_local_switch() {
@@ -73,13 +67,16 @@ public:
     }
   }
 
-  void setup_remote_switch(uint8_t node_id) {
+  void setup_remote_switch(uint32_t node_id, uint8_t local = 0) {
     for (uint8_t swid = 0; swid < _size; swid++) {
       if (_node_ids[swid] != 0)
         continue;
 
       _node_ids[swid] = node_id;
       _states_sw[swid] = false;
+      if (local) {
+        this->_local_sw_id = swid;
+      }
 
       this->emit(this->_node_ids[swid], "query::state");
       return;
@@ -120,6 +117,7 @@ public:
 
     this->_states_sw[swid] = true;
 
+    Serial.printf("MeshSwitchFunction::on(%u)\n", swid);
     return sync_dev_state(swid);
   }
 
@@ -127,8 +125,9 @@ public:
     if (this->_size < swid)
       return false;
 
-    this->_states_sw[swid] = true;
+    this->_states_sw[swid] = false;
 
+    Serial.printf("MeshSwitchFunction::off(%u)\n", swid);
     return sync_dev_state(swid);
   }
 
@@ -138,10 +137,13 @@ public:
 
     this->_states_sw[swid] = state;
 
+    Serial.printf("MeshSwitchFunction::update(%u, %u)\n", swid, state);
     return sync_dev_state(swid);
   }
 
   bool run(String cmd, uint32_t req_id = 0) {
+    Serial.printf("RUN MeshSwitchFunction::run < %s, %d>", cmd.c_str(), req_id);
+
     uint8_t index{0};
     if (!cmd.startsWith(this->name(), index))
       return false;
@@ -199,49 +201,57 @@ public:
   }
 
 public:
+  bool state(uint8_t swid) { return this->_states_sw[swid]; }
+  uint32_t node_id(uint8_t swid) { return this->_node_ids[swid]; }
+  bool local(uint8_t swid) { return this->_local_sw_id == swid; }
+  uint8_t size() { return this->_size; }
+};
 
-  struct SwitchStatesIter {
-  private:
-    uint8_t curr;
-    bool _done{true};
-    MeshSwitchFunction *obj;
+class SwitchStatesIter {
+  uint8_t curr;
+  uint8_t _size;
+  bool _done{true};
+  MeshSwitchFunction *obj;
 
-  public:
-    SwitchStatesIter(MeshSwitchFunction *obj) {
-      _done = true;
-      for (uint8_t ind = 0; ind < obj->_size; ind++) {
-        if (obj->_node_ids[ind]) {
-          _done = false;
-          break;
-        }
+public:
+  SwitchStatesIter(MeshSwitchFunction *obj) {
+    _done = true;
+    _size = obj->size();
+    for (curr = 0; curr < _size; curr++) {
+      if (obj->node_id(curr)) {
+        _done = false;
+        break;
       }
     }
+  }
 
-    bool done() {
-      return _done;
-    }
+  bool done() { return _done; }
 
-    bool next() {
-      while (this->curr + 1 < obj->_size) {
-        this->curr++;
-        if (obj->_node_ids[curr]) {
-          return true;
-        }
+  bool next() {
+    while (this->curr + 1 < this->_size) {
+      this->curr++;
+      if (obj->node_id(curr)) {
+        return true;
       }
-      _done = true;
-      return false;
     }
+    _done = true;
+    return false;
+  }
 
-    uint8_t id() { return curr; }
+  uint8_t id() { return curr; }
 
-    bool state() { return obj->_states_sw[curr]; }
+  bool state() {
+    Serial.printf("MeshSwitchFunction::SwitchStatesIter.state() called\n");
+    return obj->state(curr);
+  }
 
-    bool node_id() { return obj->_node_ids[curr]; }
+  uint32_t node_id() {
+    Serial.printf("MeshSwitchFunction::SwitchStatesIter.node_id() called\n");
+    return obj->node_id(curr);
+  }
 
-    bool local() { return obj->_local_sw_id == this->curr; }
-  };
-
-  SwitchStatesIter iter_states() {
-    return SwitchStatesIter(this);
+  bool local() {
+    Serial.printf("MeshSwitchFunction::SwitchStatesIter.local() called\n");
+    return obj->local(curr);
   }
 };

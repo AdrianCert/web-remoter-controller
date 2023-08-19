@@ -13,7 +13,10 @@ class LocalSwitch : public BaseFunction {
     return !_state ? LOW : HIGH;
   }
 
-  void update_dev_state() { digitalWrite(this->pin_used, get_vtw()); }
+  void update_dev_state() {
+    Serial.printf("RUN digitalWrite<%d, %d>\n",this->pin_used, get_vtw());
+    digitalWrite(this->pin_used, get_vtw());
+  }
 
 public:
   String name() { return String("LocalSwitch"); }

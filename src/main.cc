@@ -1,5 +1,9 @@
 #include <Arduino.h>
 
+#define MNET 1
+#define PAINLESS 2
+#define USEIMPL MNET
+
 #include <ArduinoJson.h>
 #include <ESP8266WiFi.h>
 #include <ESPAsyncTCP.h>
@@ -8,10 +12,18 @@
 
 #include <IPAddress.h>
 #include <functions/mswitch.hpp>
+
+#if USEIMPL == MNET
+#include <mnet.hpp>
+#endif
+#if USEIMPL == PAINLESS
 #include <painlessMesh.h>
+#endif
 
 #define MESH_BSSID "wrcnet"
 #define MESH_TOKEN "wrcnetpass"
+// #define MESH_BSSID "Adrian SSID"
+// #define MESH_TOKEN "parola1234"
 #define MESH_CHANNEL 8
 #define MESH_PORT 5555
 
@@ -22,7 +34,7 @@
 #define PARAM_INPUT_STATE "state"
 
 #define CAPTURE_FRAME 1
-#define PIN_RELAY 0
+#define PIN_RELAY LED_BUILTIN
 #define PIN_RELAY_PULL_UP false
 #define MAX_MANAGED_DEV 5
 #define DELAY_TIME 30000
@@ -32,15 +44,354 @@
 // python .\scripts\data_sync.py cls src/main.cc -i data/index.html:index_html
 // -i data/index.js:index_js -i data/style.css:index_css
 const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LOVIMAR DASHBOARD</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.7.2/css/all.css"
+        integrity="sha384-fnmOCqbTlWIlj8LyTjo7mOUStjsKC4pOpQbqyi7RrhN7udi9RwhKkMHpvLbHG9Sr" crossorigin="anonymous" />
+    <link rel="icon" href="data:," />
+    <link href="/style.css" rel="stylesheet">
+    <script defer="defer" src="/index.js"></script>
+</head>
+<body>
+    <div class="topnav">
+        <h1>LOVIMAR DASHBOARD</h1>
+    </div>
+    <div class="content">
+        <div class="cards">
+            <div class="card temperature" id="concomitent-card">
+                <p class="card-title">
+                    <i class="fas fa-broadcast-tower"></i> Control - CONCOMITENT
+                </p>
+                <div class="card-body">
+                    <label class="switch">
+                        <input type="checkbox" onchange="toggleCheckboxAll(this)" id="concomitent-btn">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <p class="timestamp">Last Update: <span id="concomitent-lts">2023/07/28 12:43:23</span></p>
+            </div>
+            <div class="card temperature">
+                <p class="card-title">
+                    <i class="fab fa-buromobelexperte"></i> Control - INDIVIDUAL
+                </p>
+                <div class="card-body" id="individual-pannel"></div>
+                <p class="timestamp">Last Reading: <span id="individual-lts">2023/07/28 12:43:23</span></p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+
 )rawliteral";
 
 const char index_css[] PROGMEM = R"rawliteral(
+html {
+    font-family: Arial;
+    display: inline-block;
+    text-align: center;
+}
+
+h1 {
+    font-size: 2rem;
+}
+
+body {
+    margin: 0;
+}
+
+.topnav {
+    overflow: hidden;
+    background-color: #2f4468;
+    color: white;
+    font-size: 1.7rem;
+}
+
+.content {
+    padding: 20px;
+}
+
+.card {
+    background-color: white;
+    box-shadow: 2px 2px 12px 1px rgba(140, 140, 140, 0.5);
+}
+
+.cards {
+    max-width: 700px;
+    margin: 0 auto;
+    display: grid;
+    grid-gap: 2rem;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.reading {
+    font-size: 2.8rem;
+}
+
+.timestamp {
+    color: #bebebe;
+    font-size: 1rem;
+}
+
+.card-title {
+    font-size: 1.2rem;
+    font-weight: bold;
+}
+
+.card.temperature {
+    color: #b10f2e;
+}
+
+.card.humidity {
+    color: #50b8b4;
+}
+
+h2 {
+    font-size: 3rem;
+}
+
+p {
+    font-size: 3rem;
+}
+
+body {
+    max-width: 600px;
+    margin: 0px auto;
+    padding-bottom: 25px;
+}
+
+.card-body {
+    display: block;
+    padding-bottom: 8px;
+}
+
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 120px;
+    height: 68px;
+    margin: 8px;
+}
+
+.switch input {
+    display: none;
+}
+
+.switch.offline {
+    color: #2f4468;
+}
+.switch.offline::after {
+    color: #2f4468;
+    content: "~off";
+    pointer-events: none;
+}
+.switch.offline input {
+    pointer-events: none;
+}
+
+.switch span.name {
+    position: relative;
+    display: inline-block;
+    margin-top: 70px;
+    font-size: 1rem;
+}
+
+.slider {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #ccc;
+    /* z-index: 999; */
+    border-radius: 34px;
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 52px;
+    width: 52px;
+    left: 8px;
+    bottom: 8px;
+    background-color: #fff;
+    -webkit-transition: 0.4s;
+    transition: 0.4s;
+    border-radius: 68px;
+}
+
+.switch.offline .slider {
+    background-color: #6e6868;
+}
+
+.switch.offline input:checked+.slider {
+    background-color: #703a3a;
+}
+
+input:checked+.slider {
+    background-color: #2196f3;
+}
+
+input:checked+.slider:before {
+    -webkit-transform: translateX(52px);
+    -ms-transform: translateX(52px);
+    transform: translateX(52px);
+}
+
 )rawliteral";
 
 const char index_js[] PROGMEM = R"rawliteral(
+var btn_states = {};
+
+function getDateTime() {
+    return new Date().toISOString();
+}
+
+function toggleCheckbox(event) {
+    element = event.target;
+    var xhr = new XMLHttpRequest();
+    element.checked = element.checked ? false : true;
+    let id = element.id.split("individual-btn-")[1];
+    let url = `update?relay=${id}&state=${element.checked ? 'off' : 'on'}`;
+    xhr.open("GET", url, true);
+    xhr.send();
+}
+
+function toggleCheckboxAll(element) {
+    var xhr = new XMLHttpRequest();
+    element.checked = element.checked ? false : true;
+    let url = `update?state=${element.checked ? 'off' : 'on'}`;
+    xhr.open("GET", url, true);
+    xhr.send();
+}
+
+function create_relay_btn(container, r_index, r_state) {
+    let root = document.createElement('label');
+    root.classList = ['switch'];
+    container.appendChild(root);
+
+    let input = document.createElement('input');
+    input.type = "checkbox"
+    input.onchange = toggleCheckbox;
+    input.id = `individual-btn-${r_index}`;
+    root.appendChild(input);
+
+    let slider = document.createElement('span');
+    slider.classList = ["slider"];
+    root.appendChild(slider);
+
+    let title = document.createElement('span');
+    title.classList = ['name'];
+    title.textContent = `ready #${r_index}`;
+    root.appendChild(title);
+
+    relay_btn_state_update(r_index, r_state);
+}
+
+function paint_btns(data) {
+    let container = document.getElementById("individual-pannel");
+    container.innerHTML = "";
+
+    for (const [key, value] of Object.entries(data)) {
+        create_relay_btn(container, key, value);
+    }
+}
+
+function relay_btn_state_update(dev_id, state) {
+    let ts_now = getDateTime();
+    let ts_ind = document.getElementById("individual-lts");
+    let ts_com = document.getElementById("concomitent-lts");
+    let btn_ind = document.getElementById(`individual-btn-${dev_id}`);
+    let valid_state = ["on", "off"].includes(state);
+
+    if (btn_ind == null) {
+        sync_relays();
+        return;
+    }
+
+    btn_ind.checked = state == "on" ? true : false;
+    btn_states[dev_id] = btn_ind.checked;
+    btn_ind.disabled = !valid_state;
+    btn_ind.parentElement.classList = valid_state ? ["switch"] : ["switch", "offline"];
+
+    let tb_com_state = true;
+    for (const [key, value] of Object.entries(btn_states)) {
+        if ( value == false) {
+            tb_com_state = false;
+        }
+    }
+
+    document.getElementById("concomitent-btn").checked = tb_com_state;
+
+    ts_com.innerHTML = ts_now;
+    ts_ind.innerHTML = ts_now;
+}
+
+function sync_relays() {
+    fetch('/relays').then(r => r.json()).then(paint_btns);
+}
+
+function main() {
+    sync_relays();
+}
+
+document.addEventListener('DOMContentLoaded', main);
+
+if (!!window.EventSource) {
+    var source = new EventSource("/events");
+
+    source.addEventListener(
+        "open",
+        (e) => {
+            console.log("Events Connected");
+        },
+        false
+    );
+    source.addEventListener(
+        "error",
+        (e) => {
+            if (e.target.readyState != EventSource.OPEN) {
+                console.log("Events Disconnected");
+            }
+        },
+        false
+    );
+
+    source.addEventListener(
+        "message",
+        (e) => {
+            console.log("message", e.data);
+        },
+        false
+    );
+
+    source.addEventListener(
+        "relay_on",
+        (e) => {
+            relay_btn_state_update(e.data, "on");
+        },
+        false
+    );
+
+    source.addEventListener(
+        "relay_off",
+        (e) => {
+            relay_btn_state_update(e.data, "off");
+        },
+        false
+    );
+}
+
 )rawliteral";
 
+#if USEIMPL == MNET
+using Mesh = MeshNetwork;
+#endif
+#if USEIMPL == PAINLESS
 using painlessmesh::wifi::Mesh;
+#endif
 
 namespace wrc {
 namespace flags {
@@ -62,6 +413,7 @@ bool mesh_single_send(uint32_t dest, String msg);
 bool hasfusebis(uint32_t mask);
 void setfusebis(uint32_t bit);
 bool server_process_update(String state, String swid = "");
+void proc_event_send(const char *message, const char *event=NULL, uint32_t id=0, uint32_t reconnect=0);
 
 uint32_t sflags{wrc::flags::EVENT_STEAM};
 Mesh mesh{};
@@ -70,8 +422,18 @@ AsyncWebServer server(80);
 AsyncEventSource events("/events");
 BaseFunction *activeFunction[]{&msf, nullptr};
 
+IPAddress myIP(0,0,0,0);
+IPAddress myAPIP(0,0,0,0);
+
+IPAddress getlocalIP() {
+  return IPAddress(mesh.getStationIP());
+}
+
 void setup() {
   Serial.begin(SERIAL_BOUND);
+
+  delay(1);
+  Serial.println("DEVICE START");
 
   setup_mesh();
 
@@ -79,7 +441,7 @@ void setup() {
     setup_server();
   }
 
-  LocalSwitch *lsf = new LocalSwitch{PIN_RELAY, !PIN_RELAY_PULL_UP};
+  LocalSwitch *lsf = new LocalSwitch{PIN_RELAY, PIN_RELAY_PULL_UP};
   msf.setup_send_proc(&mesh_single_send);
   msf.setup_local_switch(mesh.getNodeId(), lsf);
   mesh.sendBroadcast(msf.name() + "::query::registration");
@@ -89,15 +451,18 @@ void loop() {
   mesh.update();
   rutine_send_event_stream();
   rutine_elevate_root();
+
+  if(myIP != getlocalIP()){
+    myIP = getlocalIP();
+    Serial.println("My IP is " + myIP.toString());
+  }
 }
 
+#if USEIMPL == MNET
 void setup_mesh() {
   Serial.println("Running 'setup_mesh' ...");
-  mesh.setDebugMsgTypes(ERROR | STARTUP | CONNECTION);
-  mesh.init(MESH_BSSID, MESH_TOKEN, MESH_PORT, WIFI_AP_STA, MESH_CHANNEL);
-  mesh.onReceive(&callback_receive_setup);
 
-  mesh.setContainsRoot(true);
+  mesh.init(STATION_SSID, STATION_TOKEN, MESH_PORT, WIFI_STA);
   mesh.onReceive(&callback_receive_worker);
 }
 
@@ -107,14 +472,60 @@ void rutine_elevate_root() {
   }
 
   Serial.println("Running rutine 'rutine_elevate_root' ...");
+  Serial.println(String(sflags));
+  Serial.println(String(mesh.connectionCount()));
   // configuration for root
-  if (mesh.getNodeList().size() == 0)
+  if (mesh.connectionCount() <= 1) {
+
     Serial.println("Elevate current node as root ...");
-  mesh.setHostname("WRC_BRIDGE");
-  mesh.stationManual(STATION_SSID, STATION_TOKEN);
-  mesh.setRoot(true);
-  setfusebis(wrc::flags::MESH_ROOT);
+    // mesh.stationManual(STATION_SSID, STATION_TOKEN);
+    // mesh.setHostname("WRC_BRIDGE");
+    // mesh.setRoot(true);
+    // mesh.setContainsRoot(true);
+    setfusebis(wrc::flags::MESH_ROOT);
+    setup_server();
+  }
 }
+#endif
+#if USEIMPL == PAINLESS
+void setup_mesh() {
+  Serial.println("Running 'setup_mesh' ...");
+  mesh.setDebugMsgTypes(ERROR | STARTUP | CONNECTION);
+  mesh.init(MESH_BSSID, MESH_TOKEN, MESH_PORT, WIFI_STA);
+  mesh.onReceive(&callback_receive_worker);
+
+  mesh.stationManual(STATION_SSID, STATION_TOKEN);
+  mesh.setHostname("WRC_BRIDGE");
+  mesh.setRoot(true);
+
+  mesh.setContainsRoot(true);
+
+  myAPIP = IPAddress(mesh.getAPIP());
+  Serial.println("My AP IP is " + myAPIP.toString());
+}
+
+void rutine_elevate_root() {
+  if (hasfusebis(wrc::flags::MESH_ROOT)) {
+    return;
+  }
+
+  Serial.println("Running rutine 'rutine_elevate_root' ...");
+  Serial.println(String(sflags));
+  Serial.println(String(mesh.getNodeList().size()));
+  // configuration for root
+  if (mesh.getNodeList().size() == 0) {
+
+    Serial.println("Elevate current node as root ...");
+    mesh.stationManual(STATION_SSID, STATION_TOKEN);
+    mesh.setHostname("WRC_BRIDGE");
+    mesh.setRoot(true);
+    mesh.setContainsRoot(true);
+    setfusebis(wrc::flags::MESH_ROOT);
+    setup_server();
+  }
+}
+#endif
+
 
 void rutine_send_event_stream() {
   static uint64_t last_ts;
@@ -130,10 +541,10 @@ void rutine_send_event_stream() {
   }
 
   Serial.println("Event update sending ...");
-  events.send("ping", NULL, millis());
-  auto msf_iter = msf.iter_states();
+  proc_event_send("ping", NULL, millis());
+  SwitchStatesIter msf_iter = SwitchStatesIter(&msf);
   while (!msf_iter.done()) {
-    events.send(String(msf_iter.id() + 1).c_str(),
+    proc_event_send(String(msf_iter.id() + 1).c_str(),
                 msf_iter.state() ? "relay_on" : "relay_off", millis());
     msf_iter.next();
   }
@@ -162,7 +573,7 @@ void setup_server() {
   server.on("/update", HTTP_GET, [](AsyncWebServerRequest *request) {
     Serial.print("[HTTP][GET] ");
     Serial.println(request->url());
-    if (request->hasParam(PARAM_INPUT_RELAY) &
+    if (request->hasParam(PARAM_INPUT_RELAY) &&
         request->hasParam(PARAM_INPUT_STATE)) {
       server_process_update(request->getParam(PARAM_INPUT_STATE)->value(),
                             request->getParam(PARAM_INPUT_RELAY)->value());
@@ -176,9 +587,9 @@ void setup_server() {
   });
 
   server.on("/relays", HTTP_GET, [](AsyncWebServerRequest *request) {
-    StaticJsonDocument<200> doc;
+    StaticJsonDocument<5024> doc{};
     String respone;
-    auto msf_iter = msf.iter_states();
+    SwitchStatesIter msf_iter = SwitchStatesIter(&msf);
     while (!msf_iter.done()) {
       doc[String(msf_iter.id() + 1)] = msf_iter.state() ? "on" : "off";
       msf_iter.next();
@@ -212,7 +623,7 @@ void callback_receive_worker(const uint32_t &from, const String &msg) {
 }
 
 bool hasfusebis(uint32_t mask) { return (sflags & mask) == mask; }
-void setfusebis(uint32_t bit) { sflags |= bit; }
+void setfusebis(uint32_t bit) { sflags = sflags | bit; }
 bool mesh_single_send(uint32_t dest, String msg) {
   Serial.printf("outgoing message to %u : %s\n", dest, msg.c_str());
   return mesh.sendSingle(dest, msg);
@@ -222,13 +633,19 @@ bool server_process_update(String state, String swid) {
   String event_name{""};
   bool action_result{false};
 
+  Serial.printf("RUN server_process_update <%s, %s>\n", state.c_str(), swid.c_str());
+
   if (swid == "") {
-    auto msf_iter = msf.iter_states();
+    SwitchStatesIter msf_iter = SwitchStatesIter(&msf);
     while (!msf_iter.done()) {
       server_process_update(state, String(msf_iter.id() + 1));
       msf_iter.next();
     }
     return true;
+  }
+
+  if (!msf.node_id(swid.toInt() - 1)) {
+    return false;
   }
 
   if (state.equals(String("on"))) {
@@ -241,7 +658,20 @@ bool server_process_update(String state, String swid) {
     event_name = "relay_off";
   }
 
-  events.send(swid.c_str(), event_name.c_str(), millis());
-  Serial.println("Update event was sent ...");
+  proc_event_send(swid.c_str(), event_name.c_str(), millis());
   return action_result;
+}
+
+void proc_event_send(const char *message, const char *event, uint32_t id, uint32_t reconnect) {
+  String logMsg = "Event message was sent " + String(message);
+  if (event) {
+    logMsg += " on event " + String(event);
+  }
+
+  if (id) {
+    logMsg += " with id " + String(id);
+  }
+
+  Serial.println(logMsg);
+  events.send(message, event, id, reconnect);
 }
