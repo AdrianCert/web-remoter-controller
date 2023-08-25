@@ -51,6 +51,9 @@ struct MeshPackage {
   uint32_t source;
   char msg[200];
 };
+class MeshNetwork;
+
+MeshNetwork * mnet;
 
 class MeshNetwork {
   String _wifi_ssid;
@@ -77,6 +80,7 @@ public:
     this->_wifi_hidden = hidden;
     this->_wifi_maxconn = maxconn;
     this->network_init();
+    mnet = this;
   }
 
   void update() {
@@ -84,7 +88,7 @@ public:
   }
 
   void scan_other_roots() {
-    
+
   }
 
   uint8_t connectionCount() {
@@ -120,22 +124,21 @@ public:
     memcpy(&curr_mess, data, len);
     uint32_t dest = curr_mess.target;
     uint32_t from = curr_mess.source;
-    if (dest != 0 || dest != getNodeId()) {
+    Serial.printf("MeshNetwork::trafic<%d, %d>", from, dest);
+    if (dest != 0 && dest != getNodeId()) {
       // ignore not apply
       return;
     }
 
     String message = (char *)curr_mess.msg;
+    Serial.printf("\n%s\n----------", message.c_str());
 
     if (message == "CONN") {
       Serial.printf("New connection %d", from);
       for (uint8_t i = 0; i < MAX_CONN; i++) {
         if (!connections[i]) {
           connections[i] = from;
-          MeshPackage send_package{.target = from, .source = getNodeId()};
-          memcpy(send_package.msg, "HELLO", 5);
-          esp_now_send(BROADCAST_ADDR, (uint8_t *)&send_package,
-                       sizeof(send_package));
+          mnet->sendSingle(from, "HELLO");
           return;
         }
       }
@@ -172,15 +175,40 @@ private:
     esp_now_register_recv_cb(esp_on_recv);
   }
 
-  void network_init() {
-    uint8_t sflags{0};
-    uint64_t last_ts{0}, curr_ts{0};
-    MeshPackage msg{.target = 0, .source = getNodeId()};
-    uint8_t pair_channel = 1;
+  uint8_t wifi_init() {
+    uint8_t wifi_scan_iter = 0;
+    Serial.printf("Setting as a Wi-Fi Station ..");
+    WiFi.mode(WIFI_STA);
     // Set device as a Wi-Fi Station
-    WiFi.mode(_wifi_mode);
-
+    WiFi.begin(_wifi_ssid, _wifi_pass);
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(1000);
+      wifi_scan_iter++;
+      Serial.printf(" .");
+      if (wifi_scan_iter >= 10) {
+        // todo: make it go in ap mode
+        // break;
+      }
+    }
+    uint8_t pair_channel = WiFi.channel();
     dev_node_id = getNodeId();
+
+    Serial.printf("Setting as Wi-Fi Station done\n\treport\n");
+    Serial.printf("*****************************************\n");
+    Serial.printf("soft ap mac: %s\n", WiFi.softAPmacAddress().c_str());
+    Serial.printf("ip: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("channel: %d\n", pair_channel);
+    Serial.printf("*****************************************\n");
+    return pair_channel;
+  }
+
+  void network_init() {
+    uint64_t last_ts{0}, curr_ts{0};
+    uint8_t pair_channel = 1;
+    parent_id = 0;
+
+    Serial.printf("MeshNetwork::network_init star ...\n");
+    pair_channel = wifi_init();
     WiFi.disconnect();
 
     esp_init();
@@ -205,29 +233,18 @@ private:
 
         // Init ESP-NOW
         esp_init();
-        memcpy(msg.msg, "CONN", 4);
         last_ts = millis();
-        esp_now_send(BROADCAST_ADDR, (uint8_t *)&msg, sizeof(msg));
+        sendBroadcast("CONN");
         net_state = wrc::states::PAIR_REQUESTED;
         break;
 
       case wrc::states::PAIR_REQUESTED:
         // time out to allow receiving response from server
         curr_ts = millis();
-        if (curr_ts - last_ts > 100) {
+        if (curr_ts - last_ts > 1000) {
           last_ts = curr_ts;
-          // time out expired,  try next channel
-          pair_channel++;
-          if (pair_channel > 11) {
-            pair_channel = 0;
-            if (sflags) {
-              net_state = wrc::states::PAIR_DONE;
-              _is_root = 1;
-              break;
-            }
-            sflags = 1;
-          }
-          net_state = wrc::states::PAIR_REQUEST;
+          net_state = wrc::states::PAIR_DONE;
+          _is_root = 1;
         }
         break;
 
@@ -237,28 +254,10 @@ private:
       }
     }
 
-    esp_now_deinit();
-    esp_init();
-
-    if (!isRoot()) {
+    if (isRoot()) {
+      wifi_init();
       return;
     }
-
-    WiFi.mode(_wifi_mode);
-    // Set device as a Wi-Fi Station
-    WiFi.begin(_wifi_ssid, _wifi_pass);
-    while (WiFi.status() != WL_CONNECTED) {
-      delay(1000);
-      Serial.println("Setting as a Wi-Fi Station..");
-    }
-
-    pair_channel = WiFi.channel();
-    Serial.print("Server SOFT AP MAC Address:  ");
-    Serial.println(WiFi.softAPmacAddress());
-    Serial.print("Station IP Address: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("Wi-Fi Channel: ");
-    Serial.println(pair_channel);
   }
 };
 
