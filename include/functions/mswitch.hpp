@@ -60,6 +60,11 @@ class MeshSwitchFunction : public BaseFunction {
       SwitchState swd = pick_state(swid);
       _on_change_sw(swd);
     }
+
+    if (local(swid)) {
+      emit(0, _states_sw[_local_sw_id] ? "result::state::on"
+                                       : "result::state::off");
+    }
   }
 
 public:
