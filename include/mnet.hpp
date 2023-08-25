@@ -193,7 +193,7 @@ private:
     uint8_t pair_channel = WiFi.channel();
     dev_node_id = getNodeId();
 
-    Serial.printf("Setting as Wi-Fi Station done\n\treport\n");
+    Serial.printf("\nSetting as Wi-Fi Station done\n\treport\n");
     Serial.printf("*****************************************\n");
     Serial.printf("soft ap mac: %s\n", WiFi.softAPmacAddress().c_str());
     Serial.printf("ip: %s\n", WiFi.localIP().toString().c_str());
@@ -219,7 +219,7 @@ private:
       }
       switch (net_state) {
       case wrc::states::PAIR_REQUEST:
-        Serial.printf("Pairing request on channel %d", pair_channel);
+        Serial.printf("Pairing request on channel %d\n", pair_channel);
 
         // clean esp now
         esp_now_deinit();

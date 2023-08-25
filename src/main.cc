@@ -405,10 +405,12 @@ enum FuseBits {
 
 void callback_receive_setup(const uint32_t &from, const String &msg);
 void callback_receive_worker(const uint32_t &from, const String &msg);
+void callback_sw_state_changed(SwitchState &swd);
 void setup_mesh();
 void setup_server();
 void rutine_send_event_stream();
 void rutine_elevate_root();
+void rutine_query_state();
 bool mesh_single_send(uint32_t dest, String msg);
 bool hasfusebis(uint32_t mask);
 void setfusebis(uint32_t bit);
@@ -420,7 +422,7 @@ String sjson_sw(MeshSwitchFunction *sw);
 // uint32_t sflags{wrc::flags::EVENT_STEAM};
 uint32_t sflags{0};
 Mesh mesh{};
-SwitchState * sw_state = new SwitchState();
+SwitchState *sw_state = new SwitchState();
 MeshSwitchFunction msf{MAX_MANAGED_DEV};
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
@@ -445,6 +447,7 @@ void setup() {
   }
 
   LocalSwitch *lsf = new LocalSwitch{PIN_RELAY, PIN_RELAY_PULL_UP};
+  msf.on_change(callback_sw_state_changed);
   msf.setup_send_proc(&mesh_single_send);
   msf.setup_local_switch(mesh.getNodeId(), lsf);
   mesh.sendBroadcast(msf.name() + "::query::registration");
@@ -454,6 +457,7 @@ void loop() {
   mesh.update();
   rutine_send_event_stream();
   rutine_elevate_root();
+  rutine_query_state();
 
   if (myIP != getlocalIP()) {
     myIP = getlocalIP();
@@ -528,6 +532,20 @@ void rutine_elevate_root() {
   }
 }
 #endif
+
+void rutine_query_state() {
+  static uint64_t last_ts{0};
+  if ((sflags & wrc::flags::SERVER_HOST) == 0x0) {
+    return;
+  }
+
+  if ((millis() - last_ts) <= 5000) {
+    return;
+  }
+  last_ts = millis();
+
+  msf.query_state_all();
+}
 
 void rutine_send_event_stream() {
   static uint64_t last_ts;
@@ -610,10 +628,21 @@ void callback_receive_setup(const uint32_t &from, const String &msg) {
   Serial.printf("incoming message from %u : %s\n", from, msg.c_str());
 }
 
+void callback_sw_state_changed(SwitchState &swd) {
+  proc_event_send(String(swd.store_id + 1).c_str(),
+                  swd.state ? "relay_on" : "relay_off", millis());
+}
+
 void callback_receive_worker(const uint32_t &from, const String &msg) {
-  Serial.printf("incoming message from %u : %s\n", from, msg.c_str());
-  for (BaseFunction **fct = activeFunction; fct != nullptr; fct++) {
-    (*fct)->run(msg, from);
+  Serial.printf("Incoming message from %u : %s\n", from, msg.c_str());
+  for (uint8_t ind = 0;; ind++) {
+    BaseFunction *fct = activeFunction[ind];
+    if (fct == nullptr) {
+      break;
+    }
+    Serial.printf("Handling message with %s\n", fct->name().c_str());
+    fct->run(msg, from);
+    Serial.printf("-----\n");
   }
 }
 
@@ -626,14 +655,13 @@ bool mesh_single_send(uint32_t dest, String msg) {
 
 bool server_process_update(String state, String swid) {
   String event_name{""};
-  bool action_result{false};
 
   Serial.printf("RUN server_process_update <%s, %s>\n", state.c_str(),
                 swid.c_str());
 
   if (swid == "") {
     mesh.sendBroadcast(msf.name() + "::update::" + state);
-    server_process_update(state , String(msf.index_lsf()+ 1));
+    server_process_update(state, String(msf.index_lsf() + 1));
     return true;
   }
 
@@ -642,17 +670,14 @@ bool server_process_update(String state, String swid) {
   }
 
   if (state.equals(String("on"))) {
-    action_result = msf.on(swid.toInt() - 1);
-    event_name = "relay_on";
+    return msf.on(swid.toInt() - 1);
   }
 
   if (state.equals(String("off"))) {
-    action_result = msf.off(swid.toInt() - 1);
-    event_name = "relay_off";
+    return msf.off(swid.toInt() - 1);
   }
 
-  proc_event_send(swid.c_str(), event_name.c_str(), millis());
-  return action_result;
+  return false;
 }
 
 void proc_event_send(const char *message, const char *event, uint32_t id,
@@ -675,17 +700,23 @@ void proc_event_send(const char *message, const char *event, uint32_t id,
 String sjson_sw(MeshSwitchFunction *sw) {
   String result = "{\n  ";
 
-  sw->iter(result, [](String &result, SwitchState &swd) {
-    char tmp[20]{0};
-    sprintf(tmp, JFMT_ITEM_DS, swd.store_id + 1, swd.state ? "on" : "off");
-    result += tmp;
-  }, 1);
-  sw->iter(result, [](String &result, SwitchState &swd) {
-    char tmp[20]{0};
-    sprintf(tmp, JFMT_ITEM_DS, swd.store_id + 1, swd.state ? "on" : "off");
-    result += ",\n  ";
-    result += tmp;
-  }, 10, 1);
+  sw->iter(
+      result,
+      [](String &result, SwitchState &swd) {
+        char tmp[20]{0};
+        sprintf(tmp, JFMT_ITEM_DS, swd.store_id + 1, swd.state ? "on" : "off");
+        result += tmp;
+      },
+      1);
+  sw->iter(
+      result,
+      [](String &result, SwitchState &swd) {
+        char tmp[20]{0};
+        sprintf(tmp, JFMT_ITEM_DS, swd.store_id + 1, swd.state ? "on" : "off");
+        result += ",\n  ";
+        result += tmp;
+      },
+      10, 1);
 
   result += "\n}";
   return result;

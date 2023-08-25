@@ -13,6 +13,7 @@ struct SwitchState {
 };
 
 typedef void (*cb_iter_sw)(String &data, SwitchState &swd);
+typedef void (*cb_change_sw)(SwitchState &swd);
 
 class MeshSwitchFunction : public BaseFunction {
   uint8_t _local_sw_id{0};
@@ -20,12 +21,23 @@ class MeshSwitchFunction : public BaseFunction {
   bool _states_sw[10];
   uint32_t _node_ids[10];
   uint8_t _size;
+  cb_change_sw _on_change_sw;
 
   bool (*send)(uint32_t, String){nullptr};
 
   bool sync_dev_state(uint8_t swid) {
     if (this->_size < swid)
       return false;
+
+    if (_on_change_sw) {
+        SwitchState swd{
+          .local = local(swid),
+          .node_id = node_id(swid),
+          .store_id = swid,
+          .state = state(swid)
+        };
+      _on_change_sw(swd);
+    }
 
     if (swid == _local_sw_id) {
       _local_sw->update(_states_sw[swid]);
@@ -63,6 +75,8 @@ public:
     this->_size = 0;
   }
 
+  void on_change(cb_change_sw cb) { _on_change_sw = cb;}
+
   void setup_send_proc(bool (*send)(uint32_t, String)) { this->send = send; }
 
   void setup_local_switch(uint32_t node_id, LocalSwitch *sw_function) {
@@ -95,12 +109,7 @@ public:
   }
 
   bool query_state_all() {
-    for (uint8_t swid = 0; swid < _size; swid++) {
-      if (_node_ids[swid] == 0)
-        continue;
-
-      this->emit(this->_node_ids[swid], "query::state");
-    }
+    this->emit(0, "query::state");
     return true;
   }
 
@@ -176,7 +185,7 @@ public:
   }
 
   bool run(String cmd, uint32_t req_id = 0) {
-    Serial.printf("RUN MeshSwitchFunction::run < %s, %d>", cmd.c_str(), req_id);
+    Serial.printf("RUN MeshSwitchFunction::run < %s, %d>\n", cmd.c_str(), req_id);
 
     uint8_t index{0};
     if (!cmd.startsWith(this->name(), index))
