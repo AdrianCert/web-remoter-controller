@@ -3,6 +3,17 @@
 #include "switch.hpp"
 #include <string>
 
+#define DEFAULT_VALUE 112
+
+struct SwitchState {
+  bool local;
+  uint32_t node_id;
+  uint8_t store_id;
+  bool state;
+};
+
+typedef void (*cb_iter_sw)(String &data, SwitchState &swd);
+
 class MeshSwitchFunction : public BaseFunction {
   uint8_t _local_sw_id{0};
   LocalSwitch *_local_sw{nullptr};
@@ -141,6 +152,29 @@ public:
     return sync_dev_state(swid);
   }
 
+  void iter(String &data, cb_iter_sw func, uint8_t iters = 10, uint8_t skips = 0) {
+    uint8_t count = 0;
+    for(uint8_t id=0; id < _size; id++) {
+      if (_node_ids[id]) {
+        count++;
+        if (count <= skips) {
+          continue;
+        }
+        if (count > iters) {
+          return;
+        }
+        Serial.printf("MeshSwitchFunction::iter::procesing at $%d\n", id);
+        SwitchState swd{
+          .local = local(id),
+          .node_id = node_id(id),
+          .store_id = id,
+          .state = state(id)
+        };
+        func(data, swd);
+      }
+    }
+  }
+
   bool run(String cmd, uint32_t req_id = 0) {
     Serial.printf("RUN MeshSwitchFunction::run < %s, %d>", cmd.c_str(), req_id);
 
@@ -168,6 +202,10 @@ public:
 
     if (cmd.startsWith("result::state", index)) {
       index += 15;
+
+      if (index_sni(req_id) == -1) {
+        setup_remote_switch(req_id);
+      }
 
       for (uint8_t swid = 0; swid < _size; swid++) {
         if (req_id != _node_ids[swid])
@@ -200,58 +238,21 @@ public:
     return false;
   }
 
-public:
+  int8_t index_sni(uint32_t node_id) {
+    for (uint8_t swid = 0; swid < _size; swid++) {
+      if (node_id == _node_ids[swid]) {
+        return swid;
+      }
+    }
+    return -1;
+  }
+
+  uint8_t index_lsf() {
+    return _local_sw_id;
+  }
+
   bool state(uint8_t swid) { return this->_states_sw[swid]; }
   uint32_t node_id(uint8_t swid) { return this->_node_ids[swid]; }
   bool local(uint8_t swid) { return this->_local_sw_id == swid; }
   uint8_t size() { return this->_size; }
-};
-
-class SwitchStatesIter {
-  uint8_t curr;
-  uint8_t _size;
-  bool _done{true};
-  MeshSwitchFunction *obj;
-
-public:
-  SwitchStatesIter(MeshSwitchFunction *obj) {
-    _done = true;
-    _size = obj->size();
-    for (curr = 0; curr < _size; curr++) {
-      if (obj->node_id(curr)) {
-        _done = false;
-        break;
-      }
-    }
-  }
-
-  bool done() { return _done; }
-
-  bool next() {
-    while (this->curr + 1 < this->_size) {
-      this->curr++;
-      if (obj->node_id(curr)) {
-        return true;
-      }
-    }
-    _done = true;
-    return false;
-  }
-
-  uint8_t id() { return curr; }
-
-  bool state() {
-    Serial.printf("MeshSwitchFunction::SwitchStatesIter.state() called\n");
-    return obj->state(curr);
-  }
-
-  uint32_t node_id() {
-    Serial.printf("MeshSwitchFunction::SwitchStatesIter.node_id() called\n");
-    return obj->node_id(curr);
-  }
-
-  bool local() {
-    Serial.printf("MeshSwitchFunction::SwitchStatesIter.local() called\n");
-    return obj->local(curr);
-  }
 };

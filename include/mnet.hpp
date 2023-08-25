@@ -79,7 +79,13 @@ public:
     this->network_init();
   }
 
-  void update() {}
+  void update() {
+
+  }
+
+  void scan_other_roots() {
+    
+  }
 
   uint8_t connectionCount() {
     uint8_t count = 0;

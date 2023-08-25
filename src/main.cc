@@ -34,8 +34,8 @@
 #define PARAM_INPUT_STATE "state"
 
 #define CAPTURE_FRAME 1
-#define PIN_RELAY LED_BUILTIN
-#define PIN_RELAY_PULL_UP false
+#define PIN_RELAY 0
+#define PIN_RELAY_PULL_UP true
 #define MAX_MANAGED_DEV 5
 #define DELAY_TIME 30000
 #define SERIAL_BOUND 115200
@@ -413,24 +413,27 @@ bool mesh_single_send(uint32_t dest, String msg);
 bool hasfusebis(uint32_t mask);
 void setfusebis(uint32_t bit);
 bool server_process_update(String state, String swid = "");
-void proc_event_send(const char *message, const char *event=NULL, uint32_t id=0, uint32_t reconnect=0);
+void proc_event_send(const char *message, const char *event = NULL,
+                     uint32_t id = 0, uint32_t reconnect = 0);
+String sjson_sw(MeshSwitchFunction *sw);
 
-uint32_t sflags{wrc::flags::EVENT_STEAM};
+// uint32_t sflags{wrc::flags::EVENT_STEAM};
+uint32_t sflags{0};
 Mesh mesh{};
+SwitchState * sw_state = new SwitchState();
 MeshSwitchFunction msf{MAX_MANAGED_DEV};
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
 BaseFunction *activeFunction[]{&msf, nullptr};
 
-IPAddress myIP(0,0,0,0);
-IPAddress myAPIP(0,0,0,0);
+IPAddress myIP(0, 0, 0, 0);
+IPAddress myAPIP(0, 0, 0, 0);
 
-IPAddress getlocalIP() {
-  return IPAddress(mesh.getStationIP());
-}
+IPAddress getlocalIP() { return IPAddress(mesh.getStationIP()); }
 
 void setup() {
   Serial.begin(SERIAL_BOUND);
+  pinMode(LED_BUILTIN, OUTPUT);
 
   delay(1);
   Serial.println("DEVICE START");
@@ -452,7 +455,7 @@ void loop() {
   rutine_send_event_stream();
   rutine_elevate_root();
 
-  if(myIP != getlocalIP()){
+  if (myIP != getlocalIP()) {
     myIP = getlocalIP();
     Serial.println("My IP is " + myIP.toString());
   }
@@ -526,7 +529,6 @@ void rutine_elevate_root() {
 }
 #endif
 
-
 void rutine_send_event_stream() {
   static uint64_t last_ts;
   if ((sflags & wrc::flags::EVENT_STEAM) == 0x0) {
@@ -542,12 +544,12 @@ void rutine_send_event_stream() {
 
   Serial.println("Event update sending ...");
   proc_event_send("ping", NULL, millis());
-  SwitchStatesIter msf_iter = SwitchStatesIter(&msf);
-  while (!msf_iter.done()) {
-    proc_event_send(String(msf_iter.id() + 1).c_str(),
-                msf_iter.state() ? "relay_on" : "relay_off", millis());
-    msf_iter.next();
-  }
+  String nfo{};
+
+  msf.iter(nfo, [](String &data, SwitchState &swd) {
+    proc_event_send(String(swd.store_id + 1).c_str(),
+                    swd.state ? "relay_on" : "relay_off", millis());
+  });
   last_ts = millis();
 }
 
@@ -587,15 +589,8 @@ void setup_server() {
   });
 
   server.on("/relays", HTTP_GET, [](AsyncWebServerRequest *request) {
-    StaticJsonDocument<5024> doc{};
-    String respone;
-    SwitchStatesIter msf_iter = SwitchStatesIter(&msf);
-    while (!msf_iter.done()) {
-      doc[String(msf_iter.id() + 1)] = msf_iter.state() ? "on" : "off";
-      msf_iter.next();
-    }
-    serializeJson(doc, respone);
-    request->send(200, "application/json", respone);
+    Serial.println("[HTTP][GET] /relays");
+    request->send(200, "application/json", sjson_sw(&msf));
   });
 
   events.onConnect([](AsyncEventSourceClient *client) {
@@ -633,14 +628,12 @@ bool server_process_update(String state, String swid) {
   String event_name{""};
   bool action_result{false};
 
-  Serial.printf("RUN server_process_update <%s, %s>\n", state.c_str(), swid.c_str());
+  Serial.printf("RUN server_process_update <%s, %s>\n", state.c_str(),
+                swid.c_str());
 
   if (swid == "") {
-    SwitchStatesIter msf_iter = SwitchStatesIter(&msf);
-    while (!msf_iter.done()) {
-      server_process_update(state, String(msf_iter.id() + 1));
-      msf_iter.next();
-    }
+    mesh.sendBroadcast(msf.name() + "::update::" + state);
+    server_process_update(state , String(msf.index_lsf()+ 1));
     return true;
   }
 
@@ -662,7 +655,8 @@ bool server_process_update(String state, String swid) {
   return action_result;
 }
 
-void proc_event_send(const char *message, const char *event, uint32_t id, uint32_t reconnect) {
+void proc_event_send(const char *message, const char *event, uint32_t id,
+                     uint32_t reconnect) {
   String logMsg = "Event message was sent " + String(message);
   if (event) {
     logMsg += " on event " + String(event);
@@ -674,4 +668,25 @@ void proc_event_send(const char *message, const char *event, uint32_t id, uint32
 
   Serial.println(logMsg);
   events.send(message, event, id, reconnect);
+}
+
+#define JFMT_ITEM_DS "\"%d\":\"%s\""
+
+String sjson_sw(MeshSwitchFunction *sw) {
+  String result = "{\n  ";
+
+  sw->iter(result, [](String &result, SwitchState &swd) {
+    char tmp[20]{0};
+    sprintf(tmp, JFMT_ITEM_DS, swd.store_id + 1, swd.state ? "on" : "off");
+    result += tmp;
+  }, 1);
+  sw->iter(result, [](String &result, SwitchState &swd) {
+    char tmp[20]{0};
+    sprintf(tmp, JFMT_ITEM_DS, swd.store_id + 1, swd.state ? "on" : "off");
+    result += ",\n  ";
+    result += tmp;
+  }, 10, 1);
+
+  result += "\n}";
+  return result;
 }

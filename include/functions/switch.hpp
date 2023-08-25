@@ -16,6 +16,7 @@ class LocalSwitch : public BaseFunction {
   void update_dev_state() {
     Serial.printf("RUN digitalWrite<%d, %d>\n",this->pin_used, get_vtw());
     digitalWrite(this->pin_used, get_vtw());
+    digitalWrite(LED_BUILTIN, get_vtw());
   }
 
 public:
