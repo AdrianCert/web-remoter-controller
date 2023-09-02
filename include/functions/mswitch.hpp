@@ -13,6 +13,7 @@ struct SwitchState {
 };
 
 typedef void (*cb_iter_sw)(String &data, SwitchState &swd);
+typedef void (*cb_change_sw)(SwitchState &swd);
 
 class MeshSwitchFunction : public BaseFunction {
   uint8_t _local_sw_id{0};
@@ -20,12 +21,15 @@ class MeshSwitchFunction : public BaseFunction {
   bool _states_sw[10];
   uint32_t _node_ids[10];
   uint8_t _size;
+  cb_change_sw _on_change_sw;
 
   bool (*send)(uint32_t, String){nullptr};
 
   bool sync_dev_state(uint8_t swid) {
     if (this->_size < swid)
       return false;
+
+    tigger_on_change(swid);
 
     if (swid == _local_sw_id) {
       _local_sw->update(_states_sw[swid]);
@@ -41,6 +45,26 @@ class MeshSwitchFunction : public BaseFunction {
     }
 
     return this->emit(this->_node_ids[swid], req);
+  }
+
+  SwitchState pick_state(uint8_t swid) {
+    SwitchState res{.local = this->_local_sw_id == swid,
+                    .node_id = this->_node_ids[swid],
+                    .store_id = swid,
+                    .state = this->_states_sw[swid]};
+    return res;
+  }
+
+  void tigger_on_change(uint8_t swid) {
+    if (_on_change_sw) {
+      SwitchState swd = pick_state(swid);
+      _on_change_sw(swd);
+    }
+
+    if (local(swid)) {
+      emit(0, _states_sw[_local_sw_id] ? "result::state::on"
+                                       : "result::state::off");
+    }
   }
 
 public:
@@ -62,6 +86,8 @@ public:
 
     this->_size = 0;
   }
+
+  void on_change(cb_change_sw cb) { _on_change_sw = cb; }
 
   void setup_send_proc(bool (*send)(uint32_t, String)) { this->send = send; }
 
@@ -95,12 +121,7 @@ public:
   }
 
   bool query_state_all() {
-    for (uint8_t swid = 0; swid < _size; swid++) {
-      if (_node_ids[swid] == 0)
-        continue;
-
-      this->emit(this->_node_ids[swid], "query::state");
-    }
+    this->emit(0, "query::state");
     return true;
   }
 
@@ -152,9 +173,10 @@ public:
     return sync_dev_state(swid);
   }
 
-  void iter(String &data, cb_iter_sw func, uint8_t iters = 10, uint8_t skips = 0) {
+  void iter(String &data, cb_iter_sw func, uint8_t iters = 10,
+            uint8_t skips = 0) {
     uint8_t count = 0;
-    for(uint8_t id=0; id < _size; id++) {
+    for (uint8_t id = 0; id < _size; id++) {
       if (_node_ids[id]) {
         count++;
         if (count <= skips) {
@@ -164,36 +186,36 @@ public:
           return;
         }
         Serial.printf("MeshSwitchFunction::iter::procesing at $%d\n", id);
-        SwitchState swd{
-          .local = local(id),
-          .node_id = node_id(id),
-          .store_id = id,
-          .state = state(id)
-        };
+        SwitchState swd = pick_state(id);
         func(data, swd);
       }
     }
   }
 
   bool run(String cmd, uint32_t req_id = 0) {
-    Serial.printf("RUN MeshSwitchFunction::run < %s, %d>", cmd.c_str(), req_id);
+    Serial.printf("RUN MeshSwitchFunction::run < %s, %d>\n", cmd.c_str(),
+                  req_id);
 
     uint8_t index{0};
-    if (!cmd.startsWith(this->name(), index))
+    if (!cmd.startsWith(this->name(), index)) {
       return false;
+    }
     index = cmd.indexOf("::", index) + 2;
 
     if (cmd.startsWith("query::state", index)) {
-      if (!req_id)
+      if (!req_id) {
         return true;
+      }
 
       emit(req_id, _states_sw[_local_sw_id] ? "result::state::on"
                                             : "result::state::off");
+      return true;
     }
 
     if (cmd.startsWith("query::registration", index)) {
-      if (!req_id)
+      if (!req_id) {
         return true;
+      }
 
       this->setup_remote_switch(req_id);
 
@@ -203,23 +225,22 @@ public:
     if (cmd.startsWith("result::state", index)) {
       index += 15;
 
-      if (index_sni(req_id) == -1) {
+      int8_t swid = index_sni(req_id);
+
+      if (swid == -1) {
         setup_remote_switch(req_id);
       }
 
-      for (uint8_t swid = 0; swid < _size; swid++) {
-        if (req_id != _node_ids[swid])
-          continue;
+      swid = index_sni(req_id);
 
-        if (cmd.startsWith("on", index)) {
-          _states_sw[swid] = true;
-        }
+      if (cmd.startsWith("on", index)) {
+        _states_sw[swid] = true;
+        tigger_on_change(swid);
+      }
 
-        if (cmd.startsWith("off", index)) {
-          _states_sw[swid] = false;
-        }
-
-        return true;
+      if (cmd.startsWith("off", index)) {
+        _states_sw[swid] = false;
+        tigger_on_change(swid);
       }
 
       return true;
@@ -247,9 +268,7 @@ public:
     return -1;
   }
 
-  uint8_t index_lsf() {
-    return _local_sw_id;
-  }
+  uint8_t index_lsf() { return _local_sw_id; }
 
   bool state(uint8_t swid) { return this->_states_sw[swid]; }
   uint32_t node_id(uint8_t swid) { return this->_node_ids[swid]; }
