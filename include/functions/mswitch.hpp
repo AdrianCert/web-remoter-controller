@@ -105,6 +105,10 @@ public:
   }
 
   void setup_remote_switch(uint32_t node_id, uint8_t local = 0) {
+    if (index_sni(node_id) != -1) {
+      return;
+    }
+
     for (uint8_t swid = 0; swid < _size; swid++) {
       if (_node_ids[swid] != 0)
         continue;
@@ -122,6 +126,12 @@ public:
 
   bool query_state_all() {
     this->emit(0, "query::state");
+    return true;
+  }
+
+  bool send_local_staus() {
+    this->emit(0, _states_sw[_local_sw_id] ? "result::state::on"
+                                       : "result::state::off");
     return true;
   }
 
