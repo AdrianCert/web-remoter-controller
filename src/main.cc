@@ -410,6 +410,7 @@ void setup_mesh();
 void setup_server();
 void rutine_send_event_stream();
 void rutine_elevate_root();
+void rutine_send_local_status();
 void rutine_query_state();
 bool mesh_single_send(uint32_t dest, String msg);
 bool hasfusebis(uint32_t mask);
@@ -457,7 +458,7 @@ void loop() {
   mesh.update();
   rutine_send_event_stream();
   rutine_elevate_root();
-  rutine_query_state();
+  rutine_send_local_status();
 
   if (myIP != getlocalIP()) {
     myIP = getlocalIP();
@@ -532,6 +533,18 @@ void rutine_elevate_root() {
   }
 }
 #endif
+
+void rutine_send_local_status() {
+  static uint64_t last_ts{0};
+
+  if ((millis() - last_ts) <= 1000) {
+    return;
+  }
+
+  last_ts = millis();
+
+  msf.send_local_staus();
+}
 
 void rutine_query_state() {
   static uint64_t last_ts{0};
